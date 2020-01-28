@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# So I don't accidentally leak my credentials because that would be bad
+google_creds.json
+reddit_creds.json
