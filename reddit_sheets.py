@@ -7,6 +7,8 @@ import praw
 import prawcore
 
 alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+scope = ["https://spreadsheets.google.com/feeds",'https://www.googleapis.com/auth/spreadsheets',"https://www.googleapis.com/auth/drive.file","https://www.googleapis.com/auth/drive"]
+    
 
 class RedditError(Exception):
     def __init__(self, message):
@@ -138,13 +140,14 @@ class CommandCell:
         self.sheet.update_cell(self.y, self.x, "")
 
 class RedditSheetsClient:
-    def __init__(self, sheet):
+    def __init__(self):
         with open("reddit_creds.json") as f:
             reddit_creds = json.load(f)
 
         self.reddit = RedditAPIWrapper(reddit_creds)
 
-        self.sheet = sheet
+        self.authorize()
+
         self.command_monitor = CommandCell(self.sheet, 1, 1, self.process_root_cmd)
         self.post_monitors = []
 
@@ -154,7 +157,16 @@ class RedditSheetsClient:
 
         self.iteration = 0
 
+        self.mode = "subreddit"
+
         self.posts = []
+
+    def authorize(self):
+        creds = ServiceAccountCredentials.from_json_keyfile_name("google_creds.json", scope)
+        client = gspread.authorize(creds)
+        self.sheet = client.open("Reddit Sheets").sheet1
+        self.auth_time = time.time()
+        print("Sheets API successfully authorized!")
     
     def show_error(self, error, clear=False):
         if clear:
@@ -345,18 +357,12 @@ class RedditSheetsClient:
     def command_monitor_loop(self, delay):
         while(1):
             self.command_monitor.update()
+            if time.time() - self.auth_time > delay * 4:
+                self.authorize()
             time.sleep(delay)
 
 def main():
-    scope = ["https://spreadsheets.google.com/feeds",'https://www.googleapis.com/auth/spreadsheets',"https://www.googleapis.com/auth/drive.file","https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("google_creds.json", scope)
-    client = gspread.authorize(creds)
-    sheet = client.open("Reddit Sheets").sheet1
-
-    sheets_client = RedditSheetsClient(sheet)
-
-    print("Sheets API successfully connected!")
-
+    sheets_client = RedditSheetsClient()
     sheets_client.command_monitor_loop(5)
 
 if __name__ == "__main__":
