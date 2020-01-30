@@ -1,7 +1,7 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import time
-import datetime
+from datetime import datetime
 import json
 import praw
 import prawcore
@@ -16,9 +16,13 @@ class RedditError(Exception):
 
 class RedditAPIWrapper():
     def __init__(self, creds):
-        self.upvoted = set()
-        self.downvoted = set()
-        self.saved = set()
+        self.upvoted_posts = set()
+        self.downvoted_posts = set()
+        self.saved_posts = set()
+
+        self.upvoted_comments = set()
+        self.downvoted_comments = set()
+        self.saved_comments = set()
 
         self.r = praw.Reddit(
             client_id = creds["client_id"],
@@ -65,27 +69,27 @@ class RedditAPIWrapper():
             raise RedditError("Invalid sort specifier (must be one of: top, hot, new, controversial)")
 
     def reload(self):
-        self.upvoted = set(self.r.user.me().upvoted())
-        self.downvoted = set(self.r.user.me().downvoted())
-        self.saved = set(self.r.user.me().saved())
+        self.upvoted_posts = set(self.r.user.me().upvoted())
+        self.downvoted_posts = set(self.r.user.me().downvoted())
+        self.saved_posts = set(self.r.user.me().saved())
 
     def add_upvote(self, post):
         self.remove_downvote(post)
-        self.upvoted.add(post)
+        self.upvoted_posts.add(post)
     
     def remove_upvote(self, post):
         try:
-            self.upvoted.remove(post)
+            self.upvoted_posts.remove(post)
         except KeyError:
             pass
     
     def add_downvote(self, post):
         self.remove_upvote(post)
-        self.downvoted.add(post)
+        self.downvoted_posts.add(post)
 
     def remove_downvote(self, post):
         try:
-            self.downvoted.remove(post)
+            self.downvoted_posts.remove(post)
         except KeyError:
             pass
     
@@ -94,11 +98,11 @@ class RedditAPIWrapper():
         self.remove_downvote(post)
 
     def add_saved(self, post):
-        self.saved.add(post)
+        self.saved_posts.add(post)
 
     def remove_saved(self, post):
         try:
-            self.saved.remove(post)
+            self.saved_posts.remove(post)
         except KeyError:
             pass
 
@@ -111,11 +115,11 @@ class RedditAPIWrapper():
 
     def get_submission_info(self, s):
         score = str(s.score)
-        if s in self.upvoted:
+        if s in self.upvoted_posts:
             score += "+"
-        elif s in self.downvoted:
+        elif s in self.downvoted_posts:
             score += "-"
-        if s in self.saved:
+        if s in self.saved_posts:
             score += "^"
         return [s.subreddit.display_name, s.title, s.author.name, score]
 
@@ -129,7 +133,11 @@ class CommandCell:
         print("Now monitoring cell %d%s" % (self.y, alphabet[self.x-1]))
     
     def update(self):
-        cell_value = self.sheet.cell(self.x, self.y).value
+        try:
+            cell_value = self.sheet.cell(self.x, self.y).value
+        except gspread.exceptions.APIError:
+            print("Failed", datetime.now())
+            exit()
         if cell_value != "":
             self.on_cmd(cell_value, **self.kwargs, caller=self)
 
@@ -152,8 +160,12 @@ class RedditSheetsClient:
         self.post_monitors = []
 
         self.current_subreddit = None
-        self.current_sort = None
-        self.current_time_filter = None
+        self.current_post_sort = None
+        self.current_post_time_filter = None
+
+        self.current_post = None
+        self.current_comment_sort = None
+        self.current_comment_time_filter = None
 
         self.iteration = 0
 
@@ -166,13 +178,25 @@ class RedditSheetsClient:
         client = gspread.authorize(creds)
         self.sheet = client.open("Reddit Sheets").sheet1
         self.auth_time = time.time()
-        print("Sheets API successfully authorized!")
+        print("Sheets API successfully authorized,", datetime.now())
     
     def show_error(self, error, clear=False):
         if clear:
             self.sheet.clear()
         print("Error:", error)
         self.command_monitor.show_response("Error: " + error)
+
+    def insert_rows(self, rows, index, extra=None):
+        added = []
+        if index == -1:
+            index = self.sheet.row_count()
+        for i, row in enumerate(rows):
+            info = (i + index, row)
+            if extra:
+                info += (extra[i],)
+            added.append(info)
+            self.sheet.insert_row(row, index=i + index)
+        return added
     
     def show_posts(self, subreddit=None, sort=None, time_filter=None, extend=False):
         subreddit_str = "r/" + subreddit if subreddit else "frontpage"
@@ -203,8 +227,7 @@ class RedditSheetsClient:
 
         if not extend:
             self.sheet.insert_row(["Subreddit", "Title", "Author", "Score"], 2)
-        for info in post_info[-20:]:
-            self.sheet.append_row(info)
+        self.insert_rows(post_info[-20:], -1)
 
     def get_post_on_row(self, args, args_index):
         try:
@@ -241,10 +264,10 @@ class RedditSheetsClient:
             self.current_subreddit = None if args[0] == "frontpage" else args[0][2:]
             if len(args) >= 2:
                 sort = args[1]
-                self.current_sort = sort
+                self.current_post_sort = sort
                 if len(args) == 3:
                     time_filter = args[2]
-                    self.current_time_filter = args[2]
+                    self.current_post_time_filter = args[2]
                 elif len(args) > 3:
                     self.show_error("Too many arguments for subreddit request.")
                     return
@@ -253,92 +276,130 @@ class RedditSheetsClient:
         # Switch sort
         elif args[0] in ["top", "hot", "new", "controversial"]:
             self.sheet.clear()
-            self.current_sort = args[0]
-            time_filter = None
-            if len(args) == 2:
-                time_filter = args[1]
-                self.current_time_filter = args[1]
-            elif len(args) > 2:
-                self.show_error("Too many arguments for sort request.")
-                return
-            self.show_posts(self.current_subreddit, self.current_sort, time_filter)
+            if self.mode == "subreddit":
+                self.current_post_sort = args[0]
+                time_filter = None
+                if len(args) == 2:
+                    time_filter = args[1]
+                    self.current_post_time_filter = args[1]
+                elif len(args) > 2:
+                    self.show_error("Too many arguments for sort request.")
+                    return
+                self.show_posts(self.current_subreddit, self.current_post_sort, time_filter)
+            elif self.mode == "post":
+                pass
 
         # Switch time filter
         elif args[0] in ["all", "day", "week", "hour", "month", "year"]:
             self.sheet.clear()
-            self.current_time_filter = args[0]
-            self.show_posts(self.current_subreddit, self.current_sort, self.current_time_filter)
+            if self.mode == "subreddit":
+                self.current_post_time_filter = args[0]
+                self.show_posts(self.current_subreddit, self.current_post_sort, self.current_post_time_filter)
+            elif self.mode == "post":
+                pass
 
-        # Get more posts
+        # Get more posts or comments
         elif args[0] == "more":
             self.command_monitor.clear()
-            self.show_posts(self.current_subreddit, self.current_sort, self.current_time_filter, extend=True)
+            if self.mode == "subreddit":
+                self.show_posts(self.current_subreddit, self.current_post_sort, self.current_post_time_filter, extend=True)
+            elif self.mode == "post":
+                pass
 
-        # Refresh current subreddit and configuration
+        # Refresh current subreddit/post and configuration
         elif args[0] == "refresh":
             self.sheet.clear()
-            self.show_posts(self.current_subreddit, self.current_sort, self.current_time_filter)
+            if self.mode == "subreddit":
+                self.show_posts(self.current_subreddit, self.current_post_sort, self.current_post_time_filter)
+            elif self.mode == "post":
+                pass
         
         # Clear the page
         elif args[0] == "clear":
             self.sheet.clear()
 
-        # Give link for a post
+        # Give link for a post or comment
         elif args[0] == "link":
             self.command_monitor.clear()
-            post_index = self.get_post_on_row(args, 1)
-            if post_index != None:
-                self.command_monitor.show_response(self.posts[post_index].shortlink)
+            if self.mode == "subreddit":
+                post_index = self.get_post_on_row(args, 1)
+                if post_index != None:
+                    self.command_monitor.show_response(self.posts[post_index].shortlink)
+            elif self.mode == "post":
+                pass
 
-        # Upvote a post
+        # Upvote a post or comment
         elif args[0] == "upvote":
             self.command_monitor.clear()
-            post_index = self.get_post_on_row(args, 1)
-            if post_index != None:
-                self.posts[post_index].upvote()
-                self.reddit.add_upvote(self.posts[post_index])
-                self.command_monitor.show_response("Upvoted post on row %d" % (post_index + 3))
-                self.update_post(post_index)
+            if self.mode == "subreddit":
+                post_index = self.get_post_on_row(args, 1)
+                if post_index != None:
+                    self.posts[post_index].upvote()
+                    self.reddit.add_upvote(self.posts[post_index])
+                    self.command_monitor.show_response("Upvoted post on row %d" % (post_index + 3))
+                    self.update_post(post_index)
+            elif self.mode == "post":
+                pass
 
-        # Downvote a post
+        # Downvote a post or comment
         elif args[0] == "downvote":
             self.command_monitor.clear()
-            post_index = self.get_post_on_row(args, 1)
-            if post_index != None:
-                self.posts[post_index].downvote()
-                self.reddit.add_downvote(self.posts[post_index])
-                self.command_monitor.show_response("Downvoted post on row %d" % (post_index + 3))
-                self.update_post(post_index)
+            if self.mode == "subreddit":
+                post_index = self.get_post_on_row(args, 1)
+                if post_index != None:
+                    self.posts[post_index].downvote()
+                    self.reddit.add_downvote(self.posts[post_index])
+                    self.command_monitor.show_response("Downvoted post on row %d" % (post_index + 3))
+                    self.update_post(post_index)
+            elif self.mode == "post":
+                pass
 
-        # Clear the vote on a post
+        # Clear the vote on a post or comment
         elif args[0] == "clear_vote":
             self.command_monitor.clear()
-            post_index = self.get_post_on_row(args, 1)
-            if post_index != None:
-                self.posts[post_index].clear_vote()
-                self.reddit.remove_votes(self.posts[post_index])
-                self.command_monitor.show_response("Cleared vote on post on row %d" % (post_index + 3))
-                self.update_post(post_index)
+            if self.mode == "subreddit":
+                post_index = self.get_post_on_row(args, 1)
+                if post_index != None:
+                    self.posts[post_index].clear_vote()
+                    self.reddit.remove_votes(self.posts[post_index])
+                    self.command_monitor.show_response("Cleared vote on post on row %d" % (post_index + 3))
+                    self.update_post(post_index)
+            elif self.mode == "post":
+                pass
 
-        # Save a post
+        # Save a post or comment
         elif args[0] == "save":
             self.command_monitor.clear()
-            post_index = self.get_post_on_row(args, 1)
-            if post_index != None:
-                self.posts[post_index].save()
-                self.reddit.add_saved(self.posts[post_index])
-                self.command_monitor.show_response("Saved post on row %d" % (post_index + 3))
-                self.update_post(post_index)
+            if self.mode == "subreddit":
+                post_index = self.get_post_on_row(args, 1)
+                if post_index != None:
+                    self.posts[post_index].save()
+                    self.reddit.add_saved(self.posts[post_index])
+                    self.command_monitor.show_response("Saved post on row %d" % (post_index + 3))
+                    self.update_post(post_index)
+            elif self.mode == "post":
+                pass
 
-        # Unsave a post
+        # Unsave a post or comment
         elif args[0] == "unsave":
             self.command_monitor.clear()
-            post_index = self.get_post_on_row(args, 1)
-            if post_index != None:
-                self.posts[post_index].unsave()
-                self.reddit.remove_saved(self.posts[post_index])
-                self.command_monitor.show_response("Unsaved post on row %d" % (post_index + 3))
-                self.update_post(post_index)
+            if self.mode == "subreddit":
+                post_index = self.get_post_on_row(args, 1)
+                if post_index != None:
+                    self.posts[post_index].unsave()
+                    self.reddit.remove_saved(self.posts[post_index])
+                    self.command_monitor.show_response("Unsaved post on row %d" % (post_index + 3))
+                    self.update_post(post_index)
+            elif self.mode == "post":
+                pass
+
+        # Open a post
+        elif args[0] == "open":
+            self.sheet.clear()
+            if self.mode == "subreddit":
+                pass
+            elif self.mode == "post":
+                self.show_error("Cannot open anything on a post display.")
 
         # Reload user info
         elif args[0] == "reload":
@@ -357,7 +418,7 @@ class RedditSheetsClient:
     def command_monitor_loop(self, delay):
         while(1):
             self.command_monitor.update()
-            if time.time() - self.auth_time > delay * 4:
+            if time.time() - self.auth_time > 3600 - delay * 2 - 5:
                 self.authorize()
             time.sleep(delay)
 
