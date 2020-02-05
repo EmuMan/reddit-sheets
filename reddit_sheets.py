@@ -109,11 +109,12 @@ class RedditAPIWrapper():
     def get_submissions_and_info(self, submissions):
         submissions = list(submissions)
         try:
-            return submissions, [self.get_submission_info(s) for s in submissions]
+            to_return = (submissions, [self.get_submission_info(s) for s in submissions])
+            return to_return
         except (prawcore.exceptions.NotFound, prawcore.exceptions.Redirect):
             raise RedditError("Could not find subreddit.")
 
-    def get_submission_info(self, s):
+    def get_submission_info(self, s, upvote_ratio=False):
         score = str(s.score)
         if s in self.upvoted_posts:
             score += "+"
@@ -121,7 +122,13 @@ class RedditAPIWrapper():
             score += "-"
         if s in self.saved_posts:
             score += "^"
-        return [s.subreddit.display_name, s.title, s.author.name, score]
+        return [s.subreddit.display_name, s.title, s.author.name, score, (str(s.upvote_ratio * 100) + "%" if upvote_ratio else "N/A%")]
+
+    def get_post(self, id):
+        try:
+            return self.r.submission(id)
+        except Exception:
+            return None
 
 class CommandCell:
     def __init__(self, sheet, x, y, on_cmd, **kwargs):
@@ -175,8 +182,8 @@ class RedditSheetsClient:
 
     def authorize(self):
         creds = ServiceAccountCredentials.from_json_keyfile_name("google_creds.json", scope)
-        client = gspread.authorize(creds)
-        self.sheet = client.open("Reddit Sheets").sheet1
+        self.client = gspread.authorize(creds)
+        self.sheet = self.client.open("Reddit Sheets").sheet1
         self.auth_time = time.time()
         print("Sheets API successfully authorized,", datetime.now())
     
@@ -187,15 +194,15 @@ class RedditSheetsClient:
         self.command_monitor.show_response("Error: " + error)
 
     def insert_rows(self, rows, index, extra=None):
+        print("Inserting %d rows into the document..." % len(rows))
         added = []
-        if index == -1:
-            index = self.sheet.row_count()
         for i, row in enumerate(rows):
             info = (i + index, row)
             if extra:
                 info += (extra[i],)
             added.append(info)
             self.sheet.insert_row(row, index=i + index)
+        print("Done.")
         return added
     
     def show_posts(self, subreddit=None, sort=None, time_filter=None, extend=False):
@@ -210,6 +217,7 @@ class RedditSheetsClient:
                 subreddit_str += " of the past " + time_filter
         
         self.command_monitor.show_response(subreddit_str)
+        print("Gathering posts for %s..." % subreddit_str)
 
         if extend:
             self.iteration += 1
@@ -227,7 +235,26 @@ class RedditSheetsClient:
 
         if not extend:
             self.sheet.insert_row(["Subreddit", "Title", "Author", "Score"], 2)
-        self.insert_rows(post_info[-20:], -1)
+        self.insert_rows(post_info[-20:], 3)
+
+    def display_post(self, post):
+        info = self.reddit.get_submission_info(post, upvote_ratio=True)
+        info_dict = dict(zip(["subreddit", "title", "author", "score", "ratio"], info)) # god this is bad
+        post_content = post.selftext
+        image = False
+        if post_content == "":
+            post_content = post.url
+            image = post_content.endswith((".jpg", ".png", ".gif"))
+        rows = []
+        rows.append([info_dict["title"]])
+        rows.append(["From r/" + info_dict["subreddit"] + " by " + info_dict["author"]])
+        rows.append([])
+        rows.append(["", post_content])
+        rows.append([])
+        rows.append([info_dict["score"], info_dict["ratio"]])
+        self.insert_rows(rows, 2)
+        if image:
+            self.sheet.update_cell(5, 2, self.image(post_content))
 
     def get_post_on_row(self, args, args_index):
         try:
@@ -396,20 +423,28 @@ class RedditSheetsClient:
         # Open a post
         elif args[0] == "open":
             self.sheet.clear()
-            if self.mode == "subreddit":
-                pass
-            elif self.mode == "post":
-                self.show_error("Cannot open anything on a post display.")
+            if len(args) == 2:
+                post = self.reddit.get_post(args[1])
+                if post == None:
+                    self.show_error("Could not find post with ID " + args[1])
+                else:
+                    self.command_monitor.show_response("Post at URL: " + post.shortlink)
+                    self.display_post(post)
+            else:
+                self.show_error("Must specify a single post ID")
 
         # Reload user info
         elif args[0] == "reload":
+            self.command_monitor.clear()
             self.command_monitor.show_response("Getting user info...")
             self.reddit.reload()
             self.command_monitor.show_response("User info successfully reloaded!")
 
         # Testing
         elif args[0] == "test_image":
+            self.command_monitor.clear()
             self.command_monitor.show_response(self.image("https://i.redd.it/k1nil2bq3dd41.jpg"))
+            self.sheet.append_row([self.image("https://i.redd.it/k1nil2bq3dd41.jpg")])
 
         # Command not found
         else:
@@ -419,12 +454,12 @@ class RedditSheetsClient:
         while(1):
             self.command_monitor.update()
             if time.time() - self.auth_time > 3600 - delay * 2 - 5:
-                self.authorize()
+                self.client.login()
             time.sleep(delay)
 
 def main():
     sheets_client = RedditSheetsClient()
-    sheets_client.command_monitor_loop(5)
+    sheets_client.command_monitor_loop(10)
 
 if __name__ == "__main__":
     main()
