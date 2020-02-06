@@ -9,6 +9,18 @@ import prawcore
 alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 scope = ["https://spreadsheets.google.com/feeds",'https://www.googleapis.com/auth/spreadsheets',"https://www.googleapis.com/auth/drive.file","https://www.googleapis.com/auth/drive"]
     
+def safe_request(func, *args):
+    # make sure program doesn't crash when requests exceed 100/100s
+    # return func(*args)
+    try:
+        return func(*args)
+    except gspread.exceptions.APIError:
+        print("Limit of 100 requests per 100 seconds exceeded. Activating cooldown...")
+        time.sleep(100) # wait until sure that request limit is reset
+        try:
+            return func(*args) # try again
+        except gspread.exceptions.APIError:
+            print("Still recieving error, may not be request limit related. Giving up...")
 
 class RedditError(Exception):
     def __init__(self, message):
@@ -140,19 +152,15 @@ class CommandCell:
         print("Now monitoring cell %d%s" % (self.y, alphabet[self.x-1]))
     
     def update(self):
-        try:
-            cell_value = self.sheet.cell(self.x, self.y).value
-        except gspread.exceptions.APIError:
-            print("Failed", datetime.now())
-            exit()
+        cell_value = safe_request(self.sheet.cell, self.x, self.y).value
         if cell_value != "":
             self.on_cmd(cell_value, **self.kwargs, caller=self)
 
     def show_response(self, message):
-        self.sheet.update_cell(self.y, self.x + 1, message)
+        safe_request(self.sheet.update_cell, self.y, self.x + 1, message)
 
     def clear(self):
-        self.sheet.update_cell(self.y, self.x, "")
+        safe_request(self.sheet.update_cell, self.y, self.x, "")
 
 class RedditSheetsClient:
     def __init__(self):
@@ -193,6 +201,22 @@ class RedditSheetsClient:
         print("Error:", error)
         self.command_monitor.show_response("Error: " + error)
 
+    def set_cell(self, row, col, value):
+        # safe wrapper for setting a cell
+        safe_request(self.sheet.update_cell, row, col, value)
+
+    def insert_row(self, values, index):
+        # safe wrapper for setting a row
+        safe_request(self.sheet.insert_row, values, index)
+
+    def delete_row(self, index):
+        # safe wrapper for deleting a row
+        safe_request(self.sheet.delete_row, index)
+
+    def clear_sheet(self):
+        # safe wrapper for clearing the spreadsheet
+        safe_request(self.sheet.clear)
+
     def insert_rows(self, rows, index, extra=None):
         print("Inserting %d rows into the document..." % len(rows))
         added = []
@@ -201,11 +225,12 @@ class RedditSheetsClient:
             if extra:
                 info += (extra[i],)
             added.append(info)
-            self.sheet.insert_row(row, index=i + index)
+            self.insert_row(row, index=i + index)
         print("Done.")
         return added
     
     def show_posts(self, subreddit=None, sort=None, time_filter=None, extend=False):
+        self.mode = "subreddit"
         subreddit_str = "r/" + subreddit if subreddit else "frontpage"
         subreddit_str += ", " + ((sort if sort != "controversial" else "most controversial") if sort else "hot")
         if sort in ["top", "controversial"]:
@@ -234,10 +259,12 @@ class RedditSheetsClient:
             return
 
         if not extend:
-            self.sheet.insert_row(["Subreddit", "Title", "Author", "Score"], 2)
-        self.insert_rows(post_info[-20:], 3)
+            self.insert_row(["Subreddit", "Title", "Author", "Score"], 2)
+        self.insert_rows(post_info[-20:], 3 + self.iteration * 20)
 
     def display_post(self, post):
+        self.current_post = post
+        self.mode = "post"
         info = self.reddit.get_submission_info(post, upvote_ratio=True)
         info_dict = dict(zip(["subreddit", "title", "author", "score", "ratio"], info)) # god this is bad
         post_content = post.selftext
@@ -254,13 +281,18 @@ class RedditSheetsClient:
         rows.append([info_dict["score"], info_dict["ratio"]])
         self.insert_rows(rows, 2)
         if image:
-            self.sheet.update_cell(5, 2, self.image(post_content))
+            self.set_cell(5, 2, self.image(post_content))
+    
+    def refresh_post_score(self):
+        score, ratio = self.reddit.get_submission_info(self.current_post, upvote_ratio=True)[3:5]
+        self.set_cell(7, 1, score)
+        self.set_cell(7, 2, ratio)        
 
     def get_post_on_row(self, args, args_index):
         try:
             post_index = int(args[args_index]) - 3
         except IndexError:
-            self.show_error("Not enough arguments for link request.")
+            self.show_error("Not enough arguments for request.")
             return None
         except ValueError:
             self.show_error("Non-integer post index.")
@@ -274,8 +306,8 @@ class RedditSheetsClient:
 
     def update_post(self, index):
         updated_info = self.reddit.get_submission_info(self.posts[index])
-        self.sheet.delete_row(index + 3)
-        self.sheet.insert_row(updated_info, index + 3)
+        self.delete_row(index + 3)
+        self.insert_row(updated_info, index + 3)
 
     def image(self, link):
         return f"=IMAGE(\"{link}\")"
@@ -285,7 +317,7 @@ class RedditSheetsClient:
 
         # Goto subreddit
         if args[0] == "frontpage" or args[0].startswith("r/"):
-            self.sheet.clear()
+            self.clear_sheet()
             sort = None
             time_filter = None
             self.current_subreddit = None if args[0] == "frontpage" else args[0][2:]
@@ -302,7 +334,7 @@ class RedditSheetsClient:
 
         # Switch sort
         elif args[0] in ["top", "hot", "new", "controversial"]:
-            self.sheet.clear()
+            self.clear_sheet()
             if self.mode == "subreddit":
                 self.current_post_sort = args[0]
                 time_filter = None
@@ -318,7 +350,7 @@ class RedditSheetsClient:
 
         # Switch time filter
         elif args[0] in ["all", "day", "week", "hour", "month", "year"]:
-            self.sheet.clear()
+            self.clear_sheet()
             if self.mode == "subreddit":
                 self.current_post_time_filter = args[0]
                 self.show_posts(self.current_subreddit, self.current_post_sort, self.current_post_time_filter)
@@ -335,15 +367,15 @@ class RedditSheetsClient:
 
         # Refresh current subreddit/post and configuration
         elif args[0] == "refresh":
-            self.sheet.clear()
+            self.clear_sheet()
             if self.mode == "subreddit":
                 self.show_posts(self.current_subreddit, self.current_post_sort, self.current_post_time_filter)
             elif self.mode == "post":
-                pass
+                self.display_post(self.current_post)
         
         # Clear the page
         elif args[0] == "clear":
-            self.sheet.clear()
+            self.clear_sheet()
 
         # Give link for a post or comment
         elif args[0] == "link":
@@ -366,7 +398,8 @@ class RedditSheetsClient:
                     self.command_monitor.show_response("Upvoted post on row %d" % (post_index + 3))
                     self.update_post(post_index)
             elif self.mode == "post":
-                pass
+                self.reddit.add_upvote(self.current_post)
+                self.refresh_post_score()
 
         # Downvote a post or comment
         elif args[0] == "downvote":
@@ -379,7 +412,8 @@ class RedditSheetsClient:
                     self.command_monitor.show_response("Downvoted post on row %d" % (post_index + 3))
                     self.update_post(post_index)
             elif self.mode == "post":
-                pass
+                self.reddit.add_downvote(self.current_post)
+                self.refresh_post_score()
 
         # Clear the vote on a post or comment
         elif args[0] == "clear_vote":
@@ -392,7 +426,8 @@ class RedditSheetsClient:
                     self.command_monitor.show_response("Cleared vote on post on row %d" % (post_index + 3))
                     self.update_post(post_index)
             elif self.mode == "post":
-                pass
+                self.reddit.remove_votes(self.current_post)
+                self.refresh_post_score()
 
         # Save a post or comment
         elif args[0] == "save":
@@ -405,7 +440,8 @@ class RedditSheetsClient:
                     self.command_monitor.show_response("Saved post on row %d" % (post_index + 3))
                     self.update_post(post_index)
             elif self.mode == "post":
-                pass
+                self.reddit.add_saved(self.current_post)
+                self.refresh_post_score()
 
         # Unsave a post or comment
         elif args[0] == "unsave":
@@ -418,11 +454,12 @@ class RedditSheetsClient:
                     self.command_monitor.show_response("Unsaved post on row %d" % (post_index + 3))
                     self.update_post(post_index)
             elif self.mode == "post":
-                pass
+                self.reddit.remove_saved(self.current_post)
+                self.refresh_post_score()
 
         # Open a post
         elif args[0] == "open":
-            self.sheet.clear()
+            self.clear_sheet()
             if len(args) == 2:
                 post = self.reddit.get_post(args[1])
                 if post == None:
@@ -440,12 +477,6 @@ class RedditSheetsClient:
             self.reddit.reload()
             self.command_monitor.show_response("User info successfully reloaded!")
 
-        # Testing
-        elif args[0] == "test_image":
-            self.command_monitor.clear()
-            self.command_monitor.show_response(self.image("https://i.redd.it/k1nil2bq3dd41.jpg"))
-            self.sheet.append_row([self.image("https://i.redd.it/k1nil2bq3dd41.jpg")])
-
         # Command not found
         else:
             self.show_error("Command \"%s\" not recognized" % cmd)
@@ -454,7 +485,9 @@ class RedditSheetsClient:
         while(1):
             self.command_monitor.update()
             if time.time() - self.auth_time > 3600 - delay * 2 - 5:
+                print("Reauthorizing client...")
                 self.client.login()
+                print("Client successfully reauthorized.")
             time.sleep(delay)
 
 def main():
