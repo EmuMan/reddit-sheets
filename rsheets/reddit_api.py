@@ -1,19 +1,37 @@
+from dataclasses import dataclass
 from typing import Literal
 import praw
 import prawcore
 
 from .errors import *
 
-class PRAWWrapper():
+@dataclass(init=False, repr=True, eq=True)
+class SubmissionInfo:
+    subreddit: str
+    title: str
+    author: str
+    score: int
+    ratio: int
+    
+    def __init__(self, submission: praw.reddit.models.Submission):
+        self.score = str(submission.score)
+        if submission.likes == True:
+            self.score += chr(0x1f53a) # red up arrow
+        elif submission.likes == False:
+            self.score += chr(0x1f53d) # blue down button
+        if submission.saved:
+            self.score += chr(0x1f4be) # floppy disk icon
+        self.author = submission.author.name if submission.author is not None else 'deleted-user'
+        self.subreddit = submission.subreddit.display_name
+        self.title = submission.title
+        self.ratio = int(submission.upvote_ratio * 100)
+    
+    def to_row(self):
+        return [self.subreddit, self.title, self.author, f'\'{self.score}', f'\'{self.ratio}%']
+        
+
+class PRAWWrapper:
     """A class that wraps around PRAW to provide extra utilities specific to Reddit Sheets."""
-
-    upvoted_posts: set
-    downvoted_posts: set
-    saved_posts: set
-
-    upvoted_comments: set
-    downvoted_comments: set
-    saved_comments: set
 
     r: praw.Reddit
 
@@ -23,13 +41,6 @@ class PRAWWrapper():
         :param creds: A dictionary of credentials for the user, containing {client_id, client_secret, username, password, user_agent}
         :type creds: dict
         """
-        self.upvoted_posts = set()
-        self.downvoted_posts = set()
-        self.saved_posts = set()
-
-        self.upvoted_comments = set()
-        self.downvoted_comments = set()
-        self.saved_comments = set()
 
         self.r = praw.Reddit(
             client_id = creds["client_id"],
@@ -38,8 +49,6 @@ class PRAWWrapper():
             password = creds["password"],
             user_agent = creds["user_agent"]
         )
-        
-        if load_user_info: self.reload_user_info()
 
     def get_submissions(self,
                         subreddit_name: str | None = None,
@@ -84,84 +93,7 @@ class PRAWWrapper():
         else:
             raise RedditError("Invalid sort specifier (must be one of: top, hot, new, controversial)")
 
-    def reload_user_info(self) -> None:
-        """Retrieve the upvoted, downvoted, and saved posts from the user and store it locally.
-        
-        This should only be used infrequently to make sure the internal sets are still correct.
-        """
-        self.upvoted_posts = set(self.r.user.me().upvoted())
-        self.downvoted_posts = set(self.r.user.me().downvoted())
-        self.saved_posts = set(self.r.user.me().saved())
-
-    def add_upvote(self, post: praw.reddit.models.Submission) -> None:
-        """Add a post to the internal "upvoted" set if it is not already within the set.
-
-        :param post: The post to add to the "upvoted" set.
-        :type post: praw.reddit.models.Submission
-        """
-        self.remove_downvote(post)
-        self.upvoted_posts.add(post)
-    
-    def remove_upvote(self, post: praw.reddit.models.Submission) -> None:
-        """Remove a post from the internal "upvoted" set if it is already contained within the set.
-
-        :param post: The post to remove from the "upvoted" set.
-        :type post: praw.reddit.models.Submission
-        """
-        try:
-            self.upvoted_posts.remove(post)
-        except KeyError:
-            pass
-    
-    def add_downvote(self, post: praw.reddit.models.Submission) -> None:
-        """Add a post to the internal "downvoted" set if it is not already within the set.
-
-        :param post: The post to add to the "downvoted" set.
-        :type post: praw.reddit.models.Submission
-        """
-        self.remove_upvote(post)
-        self.downvoted_posts.add(post)
-
-    def remove_downvote(self, post: praw.reddit.models.Submission) -> None:
-        """Remove a post from the internal "downvoted" set if it is already contained within the set.
-
-        :param post: The post to remove from the "downvoted" set.
-        :type post: praw.reddit.models.Submission
-        """
-        try:
-            self.downvoted_posts.remove(post)
-        except KeyError:
-            pass
-    
-    def remove_votes(self, post: praw.reddit.models.Submission) -> None:
-        """Remove a post from both the "upvote"/"downvote" internal sets if it is already contained within either.
-
-        :param post: The post to remove from the "upvote"/"downvote" set.
-        :type post: praw.reddit.models.Submission
-        """
-        self.remove_upvote(post)
-        self.remove_downvote(post)
-
-    def add_saved(self, post: praw.reddit.models.Submission) -> None:
-        """Add a post to the internal "saved" set if it is not already within the set.
-
-        :param post: The post to add to the "saved" set.
-        :type post: praw.reddit.models.Submission
-        """
-        self.saved_posts.add(post)
-
-    def remove_saved(self, post: praw.reddit.models.Submission) -> None:
-        """Remove a post from the internal "saved" set if it is already contained within the set.
-
-        :param post: The post to remove from the "saved" set.
-        :type post: praw.reddit.models.Submission
-        """
-        try:
-            self.saved_posts.remove(post)
-        except KeyError:
-            pass
-
-    def get_submissions_and_info(self, submissions: praw.reddit.models.ListingGenerator) -> tuple[list[praw.reddit.models.Submission], list[list]]:
+    def get_submissions_and_info(self, submissions: praw.reddit.models.ListingGenerator) -> tuple[list[praw.reddit.models.Submission], list[SubmissionInfo]]:
         """Return a tuple containing both a list of the submissions and their info.
 
         The first element of the tuple is a Python list conversion of the `submissions` parameter.
@@ -175,35 +107,15 @@ class PRAWWrapper():
         """
         try:
             submissions = list(submissions)
-            return (submissions, [self.get_submission_info(s) for s in submissions])
+            return (submissions, [SubmissionInfo(s) for s in submissions])
         except (prawcore.exceptions.NotFound, prawcore.exceptions.Redirect):
             raise RedditError("Could not find subreddit.")
 
-    def get_submission_info(self, s: praw.reddit.models.Submission, upvote_ratio: bool = False) -> list:
-        """Return a tuple containing information on the given submission.
-
-        :param s: The submission to retrieve info on.
-        :type s: praw.reddit.models.Submission
-        :param upvote_ratio: If `False`, the upvote ratio will be returned as `N/A`, defaults to False
-        :type upvote_ratio: bool, optional
-        :return: A tuple containing: (subreddit_name, post_title, author_name, post_score, upvote_ratio)
-        :rtype: tuple
-        """
-        score = str(s.score)
-        if s in self.upvoted_posts:
-            score += "+"
-        elif s in self.downvoted_posts:
-            score += "-"
-        if s in self.saved_posts:
-            score += "^"
-        author_name = s.author.name if s.author is not None else 'deleted-user'
-        return [s.subreddit.display_name, s.title, author_name, score, (str(s.upvote_ratio * 100) + "%" if upvote_ratio else "N/A%")]
-
-    def get_post(self, _id: int) -> praw.reddit.models.Submission | None:
+    def get_post(self, _id: str) -> praw.reddit.models.Submission | None:
         """Retrieves a Reddit submission by its ID.
 
         :param _id: The ID of the submission to retrieve
-        :type _id: int
+        :type _id: str
         :return: Returns the matching Reddit submission, or None if a matching submission was not found.
         :rtype: praw.reddit.models.Submission | None
         """

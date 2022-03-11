@@ -12,7 +12,7 @@ import praw
 
 from .utils import ExpandingTable, safe_request, prepad_columns
 from .errors import RedditError
-from .reddit_api import PRAWWrapper
+from .reddit_api import PRAWWrapper, SubmissionInfo
 
 
 SCOPE = ["https://spreadsheets.google.com/feeds",'https://www.googleapis.com/auth/spreadsheets',"https://www.googleapis.com/auth/drive.file","https://www.googleapis.com/auth/drive"]
@@ -39,9 +39,6 @@ class RedditSheets:
             reddit_creds = json.load(f)
         self.reddit = PRAWWrapper(reddit_creds)
         self.log('Logged in as: ' + str(self.reddit.r.user.me()))
-        self.log('Getting extra user info...')
-        self.reddit.reload_user_info()
-        self.log('\tDone.')
         
         google_creds = ServiceAccountCredentials.from_json_keyfile_name(
             os.path.join(os.getcwd(), google_creds_file), SCOPE)
@@ -89,7 +86,7 @@ class RedditSheets:
         self.local_sheet.add_row([])
         self.local_sheet.add_row(['', 'Subreddit', 'Title', 'Author', 'Score', 'Vote %'])
         self.current_submissions, post_info = self.reddit.get_submissions_and_info(submissions)
-        self.local_sheet.add_rows(prepad_columns(post_info, 1))
+        self.local_sheet.add_rows(prepad_columns([info.to_row() for info in post_info], 1))
         
         self.commit()
         
@@ -97,20 +94,18 @@ class RedditSheets:
         self.mode = RedditSheets.DisplayMode.POST
         self.current_post = post
 
-        info = self.reddit.get_submission_info(post, upvote_ratio=True)
-        info_dict = dict(zip(['subreddit', 'title', 'author', 'score', 'ratio'], info)) # old me says "god this is bad"
-                                                                                        # i am inclined to agree
+        info = SubmissionInfo(post)
         post_content = post.selftext
         if post_content == '':
             post_content = self.imageify(post.url) if post.url.endswith(('.jpg', '.png', '.gif')) else post.url
         
         self.local_sheet.clear()
-        self.local_sheet.add_row(['', f'From r/{info_dict["subreddit"]} by {info_dict["author"]}'])
-        self.local_sheet.add_row(['', info_dict['title']])
+        self.local_sheet.add_row(['', f'From r/{info.subreddit} by {info.author}'])
+        self.local_sheet.add_row(['', info.title])
         self.local_sheet.add_row([])
         self.local_sheet.add_row(['', post_content])
         self.local_sheet.add_row([])
-        self.local_sheet.add_row(['', info_dict["score"], info_dict["ratio"]])
+        self.local_sheet.add_row(['', info.score, info.ratio])
         
         self.commit()
         
