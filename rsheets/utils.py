@@ -45,6 +45,10 @@ class ExpandingTable:
     def get_cell(self, row: int, col: int) -> str:
         if row < self.num_rows and col < self.num_cols: return self.table[row][col]
         return ''
+    
+    def export(self) -> list[list[str]]:
+        # prepends ' characters to define them as strings on Google Sheets (except formulas)
+        return [['' if value == '' else (value if value.startswith('=') else f'\'{value}') for value in row] for row in self.table]
         
     def clear(self) -> None:
         self.table = []

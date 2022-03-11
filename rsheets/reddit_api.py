@@ -10,24 +10,32 @@ class SubmissionInfo:
     subreddit: str
     title: str
     author: str
-    score: int
+    score: str
     ratio: int
+    status: str
     
     def __init__(self, submission: praw.reddit.models.Submission):
-        self.score = str(submission.score)
-        if submission.likes == True:
-            self.score += chr(0x1f53a) # red up arrow
-        elif submission.likes == False:
-            self.score += chr(0x1f53d) # blue down button
-        if submission.saved:
-            self.score += chr(0x1f4be) # floppy disk icon
-        self.author = submission.author.name if submission.author is not None else 'deleted-user'
         self.subreddit = submission.subreddit.display_name
         self.title = submission.title
-        self.ratio = int(submission.upvote_ratio * 100)
+        self.author = submission.author.name if submission.author is not None else 'deleted-user'
+        ratio = int(submission.upvote_ratio * 100)
+        self.score = f'{submission.score} ({ratio}%)'
+        self.status = ''
+        if submission.over_18:
+            self.status += chr(0x1f51e) # no under 18 icon
+        if submission.locked or submission.archived:
+            self.status += chr(0x1f512) # lock icon
+        if submission.edited:
+            self.status += chr(0x1f58a) # pen icon
+        if submission.likes == True:
+            self.status += chr(0x1f53a) # red up arrow
+        elif submission.likes == False:
+            self.status += chr(0x1f53d) # blue down button
+        if submission.saved:
+            self.status += chr(0x1f4be) # floppy disk icon
     
     def to_row(self):
-        return [self.subreddit, self.title, self.author, f'\'{self.score}', f'\'{self.ratio}%']
+        return [self.subreddit, self.title, self.author, self.score, self.status]
         
 
 class PRAWWrapper:
