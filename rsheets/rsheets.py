@@ -25,7 +25,6 @@ class RedditSheets:
         POST = enum.auto()
     
     local_sheet: ExpandingTable
-    changed: list[tuple[int, int]] # TODO: Optimize API calls by limiting to only changed cells.
     
     current_submissions: list[praw.reddit.models.Submission]
     current_post: praw.reddit.models.Submission
@@ -51,9 +50,14 @@ class RedditSheets:
         
     def commit(self) -> None:
         """Commits the local table to Google Sheets"""
-        self.worksheet.clear()
-        if self.local_sheet.num_rows > 0:
-            self.worksheet.insert_rows(self.local_sheet.export(), value_input_option='USER_ENTERED')
+        changed = self.local_sheet.get_changed_rect()
+        if changed is None: return
+        cell_range = self.worksheet.range(changed[0][0] + 1, changed[1][0] + 1,
+                                            changed[0][1] + 1, changed[1][1] + 1)
+        for cell in cell_range:
+            cell.value = self.local_sheet.get_cell(cell.row - 1, cell.col - 1, sheet_format=True)
+        self.worksheet.update_cells(cell_range, value_input_option='USER_ENTERED')
+        self.local_sheet.reset_changed()
             
     def update(self) -> None:
         """Updates the local table, pulling from Google Sheets"""
