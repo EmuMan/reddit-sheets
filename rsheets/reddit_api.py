@@ -7,14 +7,18 @@ from .errors import *
 
 @dataclass(init=False, repr=True, eq=True)
 class SubmissionInfo:
+    submission: praw.reddit.models.Submission
     subreddit: str
     title: str
     author: str
     score: str
     ratio: int
     status: str
+    is_link: bool
+    is_image: bool
     
     def __init__(self, submission: praw.reddit.models.Submission):
+        self.submission = submission
         self.subreddit = submission.subreddit.display_name
         self.title = submission.title
         self.author = submission.author.name if submission.author is not None else 'deleted-user'
@@ -33,6 +37,8 @@ class SubmissionInfo:
             self.status += chr(0x1f53d) # blue down button
         if submission.saved:
             self.status += chr(0x1f4be) # floppy disk icon
+        self.is_link = self.submission.selftext == ''
+        self.is_image = self.is_link and self.submission.url.endswith(('.jpg', '.png', '.gif'))
     
     def to_row(self):
         return [self.subreddit, self.title, self.author, self.score, self.status]

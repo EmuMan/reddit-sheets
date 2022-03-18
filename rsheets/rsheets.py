@@ -1,4 +1,3 @@
-from typing import Any, Callable
 import json
 import time
 from datetime import datetime
@@ -7,10 +6,11 @@ from enum import Enum
 import os
 
 import gspread
+import gspread_formatting
 from oauth2client.service_account import ServiceAccountCredentials
 import praw
 
-from .utils import ExpandingTable, safe_request, prepad_columns
+from .utils import ExpandingTable, prepad_columns
 from .errors import RedditError
 from .reddit_api import PRAWWrapper, SubmissionInfo
 
@@ -27,12 +27,13 @@ class RedditSheets:
     local_sheet: ExpandingTable
     
     current_submissions: list[praw.reddit.models.Submission]
-    current_post: praw.reddit.models.Submission
+    current_post_info: SubmissionInfo | None
 
     def __init__(self, reddit_creds_file: str, google_creds_file: str):
         self.local_sheet = ExpandingTable()
         
         self.current_submissions = []
+        self.current_post_info = None
         
         with open(os.path.join(os.getcwd(), reddit_creds_file)) as f:
             reddit_creds = json.load(f)
@@ -46,7 +47,21 @@ class RedditSheets:
         self.auth_time = time.time()
         self.log('Google Sheets API successfully authorized.')
 
-        self.mode = RedditSheets.DisplayMode.SUBREDDIT
+        self._mode = RedditSheets.DisplayMode.SUBREDDIT
+        
+    @property
+    def mode(self):
+        return self._mode
+        
+    @mode.setter
+    def mode(self, value: DisplayMode) -> None:
+        self._mode = value
+        with gspread_formatting.batch_updater(self.worksheet.spreadsheet) as batch:
+            bold = self._mode == RedditSheets.DisplayMode.SUBREDDIT
+            batch.format_cell_range(self.worksheet, 'B3:F3', gspread_formatting.models.CellFormat(textFormat=gspread_formatting.models.TextFormat(bold=bold)))
+            # batch.format_cell_range(self.worksheet, '8', gspread_formatting.models.CellFormat(wrapStrategy='WRAP'))
+            # if self.mode == RedditSheets.DisplayMode.POST and self.current_post_info.is_image:
+            #     batch.set_row_height(self.worksheet, '4', 342)
         
     def commit(self) -> None:
         """Commits the local table to Google Sheets"""
@@ -77,7 +92,6 @@ class RedditSheets:
         self.commit()
         
     def show_submissions(self, submissions: praw.reddit.models.ListingGenerator) -> None:
-        self.mode = RedditSheets.DisplayMode.SUBREDDIT
         self.local_sheet.clear()
         subreddit_str: str
         url_split = submissions.url.split('/')
@@ -97,16 +111,13 @@ class RedditSheets:
         self.current_submissions, post_info = self.reddit.get_submissions_and_info(submissions)
         self.local_sheet.add_rows(prepad_columns([info.to_row() for info in post_info], 1))
         
+        self.mode = RedditSheets.DisplayMode.SUBREDDIT
+        
         self.commit()
         
     def show_post(self, post: praw.reddit.models.Submission):
-        self.mode = RedditSheets.DisplayMode.POST
-        self.current_post = post
-
-        info = SubmissionInfo(post)
-        post_content = post.selftext
-        if post_content == '':
-            post_content = self.imageify(post.url) if post.url.endswith(('.jpg', '.png', '.gif')) else post.url
+        info = self.current_post_info = SubmissionInfo(post)
+        post_content = self.imageify(post.url) if info.is_image else (post.url if info.is_link else post.selftext)
         
         self.local_sheet.clear()
         self.local_sheet.add_row(['', f'From r/{info.subreddit} by {info.author}'])
@@ -116,6 +127,8 @@ class RedditSheets:
             self.local_sheet.add_row(['', line])
         self.local_sheet.add_row([])
         self.local_sheet.add_row(['', info.score, info.status])
+        
+        self.mode = RedditSheets.DisplayMode.POST
         
         self.commit()
         
@@ -135,24 +148,25 @@ class RedditSheets:
                 self.show_error(0, 1, e.message)
                 
         elif self.mode == RedditSheets.DisplayMode.POST:
+            submission = self.current_post_info.submission
             if root_cmd[0] == 'link':
-                self.local_sheet.set_cell(0, 0, self.current_post.shortlink)
+                self.local_sheet.set_cell(0, 0, submission.shortlink)
                 self.commit()
             elif root_cmd[0] == 'upvote':
-                self.current_post.upvote()
-                self.show_post(self.reddit.r.submission(self.current_post.id))
+                submission.upvote()
+                self.show_post(self.reddit.r.submission(submission.id))
             elif root_cmd[0] == 'downvote':
-                self.current_post.downvote()
-                self.show_post(self.reddit.r.submission(self.current_post.id))
+                submission.downvote()
+                self.show_post(self.reddit.r.submission(submission.id))
             elif root_cmd[0] == 'clearvote':
-                self.current_post.clear_vote()
-                self.show_post(self.reddit.r.submission(self.current_post.id))
+                submission.clear_vote()
+                self.show_post(self.reddit.r.submission(submission.id))
             elif root_cmd[0] == 'save':
-                self.current_post.save()
-                self.show_post(self.reddit.r.submission(self.current_post.id))
+                submission.save()
+                self.show_post(self.reddit.r.submission(submission.id))
             elif root_cmd[0] == 'unsave':
-                self.current_post.unsave()
-                self.show_post(self.reddit.r.submission(self.current_post.id))
+                submission.unsave()
+                self.show_post(self.reddit.r.submission(submission.id))
                 
         if self.mode == RedditSheets.DisplayMode.SUBREDDIT:
             for i, submission in enumerate(self.current_submissions, start=3):
